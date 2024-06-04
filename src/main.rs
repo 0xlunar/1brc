@@ -1,25 +1,21 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Error, Write};
+use std::io::{BufRead, BufReader, Error, Read, Write};
 use std::slice::Chunks;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 fn main() -> Result<(), std::io::Error> {
     let now = Instant::now();
-    let lines = read_file_into_lines("./measurements.txt");
-    let chunk_size = get_chunk_size(lines.len());
-    let chunks = lines.chunks(chunk_size);
-    println!("Total Lines: {}, Chunk Size: {}, Total Chunks: {}, Reading File Time: {}ms", lines.len(), chunk_size, chunks.len(), now.elapsed().as_millis());
-
-
+    let (buffer, chunks) = read_file_into_chunks("./measurements.txt");
+    println!("Reading File Time: {}ms", now.elapsed().as_millis());
     let now = Instant::now();
-    let workloads = chunks.map(|chunk| {
-        let chunk = chunk.to_vec();
+
+
+    let workloads = chunks.into_iter().map(|(start, end)| {
+        let buffer = buffer.get(start as usize..=end as usize).unwrap().to_vec();
         std::thread::spawn(move || {
-            let parsed = parse_chunk(chunk);
-            let output = process_dataset(parsed);
-            output
+            parse_chunk_bytes(buffer)
         })
     }).collect::<Vec<JoinHandle<_>>>();
 
@@ -68,26 +64,114 @@ fn read_file_into_lines(name: &str) -> Vec<String>{
     lines
 }
 
-fn read_file_into_chunks(name: &str) {
+fn read_file_into_chunks(name: &str) -> (Vec<u8>, Vec<(u64, u64)>){
     let file = File::open(name).unwrap();
     let file_size_bytes = file.metadata().unwrap().len();
-    let reader = BufReader::new(file);
+
+    println!("File Size: {:?}", file_size_bytes);
+    let mut reader = BufReader::new(file);
     let thread_count = std::thread::available_parallelism().unwrap().get();
 
     let mut chunks = Vec::new();
     let chunk_size = file_size_bytes / thread_count as u64;
+    let mut buffer: Vec<u8> = Vec::with_capacity(chunk_size as usize);
+    reader.read_to_end(&mut buffer).unwrap();
+
+    println!("Buffer Size: {:?}", buffer.len());
     let mut start_byte = 0;
-    let mut buffer = reader.buffer().iter().enumerate();
-    for i in 0..thread_count {
+    let mut i_buffer = buffer.iter().enumerate();
+    for _ in 0..thread_count {
         let end_byte = (start_byte + chunk_size).min(file_size_bytes);
-        let end_byte = buffer.find(|(pos, byte)| *pos as u64 <= end_byte && **byte == b'\n').unwrap().0 as u64;
-        let end_byte = if end_byte != -1 {
+        let mut buffer = i_buffer.clone().skip(end_byte as usize);
+        if buffer.len() == 0 {
+            break;
+        }
+        println!("Len: {:?}", buffer.len());
+        let end_byte = buffer.find(|(pos, byte)| {
+            println!("Pos: {}, Byte: {}", pos, byte);
+            **byte == b'\n'
+        }).unwrap().0 as u64;
+        let end_byte = if end_byte < file_size_bytes {
             end_byte + 1
         } else {
             file_size_bytes
         };
+        chunks.push((start_byte, end_byte));
+        start_byte = end_byte;
     }
+
+    (buffer, chunks)
 }
+
+fn parse_chunk_bytes(buffer: Vec<u8>) -> HashMap<String, (i16, i16)> {
+    // println!("Start: {}, End: {}", start_byte, end_byte);
+    // let buffer: &[u8] = buffer.get(start_byte as usize..=end_byte as usize).unwrap();
+    let mut results = HashMap::new();
+    let mut station_full = false;
+    let mut station = String::new();
+    let mut sign: i16 = 1;
+    let mut value: i16 = 0;
+
+    let mut buffer = buffer.iter();
+    while let Some(byte) = buffer.next() {
+        match byte {
+            b';' => {
+                buffer.next();
+                station_full = true;
+                continue;
+            },
+            b'-' => {
+                sign = -1;
+                continue;
+            },
+            b'.' => {
+                let last_digit = buffer.next().unwrap();
+                let char = *last_digit as char;
+                if char.is_digit(10) {
+                    // println!("Char: {}", char);
+                    let last_digit = char.to_digit(10).unwrap() as i16;
+                    value = value * 10 + last_digit;
+                }
+                continue;
+            },
+            b'\n' => {
+                value = sign * value;
+                let station_clone = station.clone();
+                results.entry(station).and_modify(|(min, max)| {
+                    if value < *min {
+                        *min = value;
+                    } else if value > *max {
+                        *max = value;
+                    }
+                }).or_insert((value, value));
+
+                // println!("Station: {}, Value: {}", station_clone, value);
+
+                station_full = false;
+                station = String::new();
+                sign = 1;
+                value = 0;
+                continue;
+            }
+            _ => {
+                let char = *byte as char;
+                if !station_full {
+                    station.push(char);
+                    continue;
+                } else {
+                    // println!("Char: {}", *byte as char);
+                    if char.is_digit(10) {
+                        value = value * 10 + (char.to_digit(10).unwrap() as i16);
+                    }
+                    continue;
+                }
+            }
+        }
+    }
+
+    results
+}
+
 
 fn get_chunk_size(lines: usize) -> usize {
     let thread_count = std::thread::available_parallelism().unwrap().get();
