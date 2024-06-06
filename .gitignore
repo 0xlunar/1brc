@@ -24,3 +24,5 @@ measurements.txt
 station.txt
 results.txt
 weather_stations.csv
+/create_measurements.bat
+/onebrc.exe

@@ -3,4 +3,14 @@ name = "onebrc"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "std"
+path = "src/main.rs"
+
+[[bin]]
+name = "mmap"
+path = "src/mmap.rs"
+
+
 [dependencies]
+memmap2 = "0.9.4"
